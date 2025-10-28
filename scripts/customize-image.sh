@@ -52,6 +52,7 @@ install_additional_packages() {
         gparted \
         gnome-disk-utility \
         vim \
+        nano \
         htop
     
     # 安装开发工具
