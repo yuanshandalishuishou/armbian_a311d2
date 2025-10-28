@@ -1,1 +1,66 @@
 
+name: Build Armbian for XF.A311D2
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 0'  # 每周日构建
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: armbian/build:latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        path: armbian-a311d2-custom
+    
+    - name: Checkout Armbian build system
+      uses: actions/checkout@v4
+      with:
+        repository: armbian/build
+        path: build
+        
+    - name: Copy custom configurations
+      run: |
+        cp -r armbian-a311d2-custom/config/* build/config/
+        cp -r armbian-a311d2-custom/patches/* build/patches/
+        cp -r armbian-a311d2-custom/scripts/* build/userpatches/
+        
+    - name: Install dependencies
+      run: |
+        apt-get update
+        apt-get install -y bc bison build-essential ccache cmake cpio curl \
+          device-tree-compiler dialog dirmngr dosfstools fakeroot flex gawk \
+          git gnupg gperf libelf-dev liblz4-tool libncurses5-dev libsdl2-dev \
+          libssl-dev lsb-release lzop mtools ninja-build openssh-client \
+          pkg-config python3 python3-pip rsync snapd sudo systemd-container \
+          u-boot-tools udev unzip vim wget xz-utils zip zlib1g-dev
+        
+    - name: Build Armbian
+      run: |
+        cd build
+        ./compile.sh \
+          BOARD=xf-a311d2 \
+          BRANCH=edge \
+          RELEASE=bookworm \
+          BUILD_DESKTOP=yes \
+          DESKTOP_ENVIRONMENT=xfce \
+          DESKTOP_ENVIRONMENT_CONFIG_NAME=config_base \
+          KERNEL_CONFIGURE=yes \
+          BUILD_MINIMAL=no \
+          EXPERT=yes
+      
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: armbian-images
+        path: build/output/images/
+        retention-days: 30
