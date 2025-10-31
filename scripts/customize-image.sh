@@ -1,33 +1,65 @@
-
 #!/bin/bash
-
 # Armbian 镜像定制脚本
 
-# 设置变量
-IMAGE_MOUNT="/mnt/image"
-ROOT_MOUNT="/mnt/image/root"
+set -e
+
+echo "=== 开始定制 XF.A311D2 Armbian 镜像 ==="
+
+# 参数检查
+if [ $# -ne 1 ]; then
+    echo "用法: $0 <镜像文件>"
+    exit 1
+fi
+
+IMAGE_FILE="$1"
+MOUNT_DIR="/mnt/image"
+
+# 检查镜像文件
+if [ ! -f "$IMAGE_FILE" ]; then
+    echo "错误: 镜像文件不存在: $IMAGE_FILE"
+    exit 1
+fi
 
 # 挂载镜像函数
 mount_image() {
-    local image_file=$1
-    local mount_point=$2
+    echo "挂载镜像: $IMAGE_FILE"
     
-    # 获取分区偏移量
-    local offset=$(fdisk -l "$image_file" | grep -o '[0-9]*[[:space:]]*Linux' | head -1 | awk '{print $1}')
-    local offset_bytes=$((offset * 512))
+    # 获取分区偏移
+    OFFSET=$(fdisk -l "$IMAGE_FILE" | grep -A5 "Device" | grep "Linux" | head -1 | awk '{print $2}')
+    OFFSET_BYTES=$((OFFSET * 512))
     
-    # 挂载镜像
-    mount -o loop,offset=$offset_bytes "$image_file" "$mount_point"
+    # 创建挂载点
+    sudo mkdir -p "$MOUNT_DIR"
+    
+    # 挂载根分区
+    sudo mount -o loop,offset=$OFFSET_BYTES "$IMAGE_FILE" "$MOUNT_DIR"
+    
+    # 绑定系统目录
+    sudo mount --bind /dev "$MOUNT_DIR/dev"
+    sudo mount --bind /proc "$MOUNT_DIR/proc" 
+    sudo mount --bind /sys "$MOUNT_DIR/sys"
 }
 
-# 安装额外的驱动和软件包
-install_additional_packages() {
-    chroot $ROOT_MOUNT /bin/bash <<EOF
+# 卸载镜像函数
+umount_image() {
+    echo "卸载镜像..."
+    sudo umount "$MOUNT_DIR/sys" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/proc" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR/dev" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR" 2>/dev/null || true
+    sudo rmdir "$MOUNT_DIR" 2>/dev/null || true
+}
+
+# 安装额外软件包
+install_packages() {
+    echo "安装额外软件包..."
+    
+    sudo chroot "$MOUNT_DIR" /bin/bash <<EOF
     # 更新系统
     apt-get update
     apt-get upgrade -y
     
-    # 安装网络工具
+    # 安装网络工具和驱动
     apt-get install -y \
         network-manager \
         wpasupplicant \
@@ -40,20 +72,20 @@ install_additional_packages() {
         firmware-realtek \
         firmware-atheros \
         firmware-iwlwifi \
-        firmware-brcm80211
+        firmware-brcm80211 \
+        firmware-misc-nonfree
     
-    # 安装桌面环境所需软件
-    apt-get install -y \
-        xfce4 \
-        xfce4-goodies \
-        lightdm \
-        firefox-esr \
-        file-manager \
-        gparted \
-        gnome-disk-utility \
-        vim \
-        nano \
-        htop
+    # 安装 XFCE 桌面（如果尚未安装）
+    if ! dpkg -l | grep -q xfce4; then
+        apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            lightdm \
+            firefox-esr \
+            thunar \
+            gparted \
+            gnome-disk-utility
+    fi
     
     # 安装开发工具
     apt-get install -y \
@@ -61,47 +93,52 @@ install_additional_packages() {
         dkms \
         git \
         python3 \
-        python3-pip
+        python3-pip \
+        vim \
+        htop
     
-    # 安装 PVE 相关依赖
+    # 安装 PVE 相关组件
     apt-get install -y \
         qemu-system-arm \
+        qemu-utils \
         libvirt-daemon-system \
         libvirt-clients \
         virt-manager \
-        bridge-utils
+        bridge-utils \
+        virtinst
     
-    # 清理缓存
+    # 清理
     apt-get autoremove -y
     apt-get clean
 EOF
 }
 
-# 配置网络和无线
-configure_networking() {
-    chroot $ROOT_MOUNT /bin/bash <<EOF
+# 配置网络
+configure_network() {
+    echo "配置网络..."
+    
+    sudo chroot "$MOUNT_DIR" /bin/bash <<EOF
     # 启用 NetworkManager
     systemctl enable NetworkManager
     
-    # 配置无线网络
+    # 配置无线
     cat > /etc/NetworkManager/conf.d/wifi-backend.conf << 'WIFICONF'
 [device]
 wifi.backend=wpa_supplicant
 WIFICONF
 
-    # 创建无线配置持久化目录
-    mkdir -p /etc/NetworkManager/conf.d/
-    
     # 配置蓝牙
     systemctl enable bluetooth
 EOF
 }
 
-# 配置 USB 设备自动识别
+# 配置 USB 设备支持
 configure_usb_devices() {
-    chroot $ROOT_MOUNT /bin/bash <<EOF
-    # 创建 udev 规则用于 USB 网络设备
-    cat > /etc/udev/rules.d/90-usb-networking.rules << 'UDEVRULES'
+    echo "配置 USB 设备支持..."
+    
+    sudo chroot "$MOUNT_DIR" /bin/bash <<EOF
+    # 创建 udev 规则
+    cat > /etc/udev/rules.d/90-xf-a311d2-usb.rules << 'UDEVRULES'
 # USB 有线网卡
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="?*", ATTR{dev_id}=="0x0", ATTR{type}=="1", KERNEL=="eth*", NAME="eth%n"
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="cdc_ether", NAME="usb%n"
@@ -112,34 +149,33 @@ SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="?*", ATTR{dev_id
 # USB 蓝牙设备
 SUBSYSTEM=="bluetooth", ACTION=="add", KERNEL=="hci*", NAME="hci%n"
 UDEVRULES
-
-    # 重新加载 udev 规则
-    udevadm control --reload-rules
-    udevadm trigger
 EOF
 }
 
 # 配置 GPU 和显示
-configure_gpu_display() {
-    chroot $ROOT_MOUNT /bin/bash <<EOF
-    # 安装 Mali GPU 驱动
+configure_gpu() {
+    echo "配置 GPU 和显示..."
+    
+    sudo chroot "$MOUNT_DIR" /bin/bash <<EOF
+    # 安装 GPU 相关包
     apt-get install -y \
         mesa-utils \
         mesa-vulkan-drivers \
         libegl1-mesa-dev \
         libgles2-mesa-dev
     
-    # 创建 GPU 配置
-    cat > /etc/X11/xorg.conf.d/20-meson.conf << 'XORGCONF'
+    # 创建 Xorg 配置
+    mkdir -p /etc/X11/xorg.conf.d
+    cat > /etc/X11/xorg.conf.d/20-xf-a311d2.conf << 'XORGCONF'
 Section "Device"
-    Identifier "Meson"
+    Identifier "A311D2"
     Driver "modesetting"
     Option "AccelMethod" "glamor"
     Option "DRI" "3"
 EndSection
 
 Section "OutputClass"
-    Identifier "Meson"
+    Identifier "A311D2"
     MatchDriver "meson"
     Driver "modesetting"
     Option "PrimaryGPU" "true"
@@ -148,56 +184,36 @@ XORGCONF
 EOF
 }
 
-# 安装 PVE 相关组件
-install_pve_components() {
-    chroot $ROOT_MOUNT /bin/bash <<EOF
-    # 添加 Proxmox 仓库（如果需要）
-    # echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve.list
+# 配置首次启动脚本
+setup_firstboot() {
+    echo "配置首次启动脚本..."
     
-    # 安装虚拟化组件
-    apt-get install -y \
-        qemu-system-arm \
-        qemu-utils \
-        libvirt-daemon-system \
-        libvirt-clients \
-        virtinst \
-        bridge-utils
-    
-    # 配置 libvirt
-    usermod -a -G libvirt armbian
-    systemctl enable libvirtd
-    
-    # 创建虚拟机网络配置示例
-    mkdir -p /home/armbian/vm-templates
-    cat > /home/armbian/vm-templates/README.md << 'VMREADME'
-# 虚拟机配置说明
+    sudo chroot "$MOUNT_DIR" /bin/bash <<EOF
+    # 创建首次启动服务
+    cat > /etc/systemd/system/xf-a311d2-firstboot.service << 'FIRSTBOOT'
+[Unit]
+Description=XF.A311D2 First Boot Setup
+After=network.target
+Before=rc-local.service
 
-## 创建 ARM 虚拟机示例：
-sudo virt-install \
-    --name arm-vm \
-    --memory 1024 \
-    --vcpus 2 \
-    --disk size=8 \
-    --os-variant debian12 \
-    --network bridge=virbr0 \
-    --graphics vnc
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xf-firstboot.sh
+RemainAfterExit=yes
 
-## 网络桥接配置：
-编辑 /etc/network/interfaces 或使用 NetworkManager
-VMREADME
-    
-    chown -R armbian:armbian /home/armbian/vm-templates
-EOF
-}
+[Install]
+WantedBy=multi-user.target
+FIRSTBOOT
 
-# 创建首次启动配置脚本
-create_firstboot_script() {
-    chroot $ROOT_MOUNT /bin/bash <<EOF
-    cat > /etc/rc.local << 'RCLOCAL'
+    # 创建首次启动脚本
+    cat > /usr/local/bin/xf-firstboot.sh << 'SCRIPT'
 #!/bin/bash
 
-# 首次启动配置
-if [ ! -f /var/firstboot_done ]; then
+FIRSTBOOT_FILE="/var/lib/xf-a311d2-firstboot"
+
+if [ ! -f "\$FIRSTBOOT_FILE" ]; then
+    echo "执行首次启动配置..."
+    
     # 重新生成 SSH 主机密钥
     rm -f /etc/ssh/ssh_host_*
     dpkg-reconfigure openssh-server
@@ -205,63 +221,40 @@ if [ ! -f /var/firstboot_done ]; then
     # 扩展文件系统
     /usr/lib/armbian/armbian-resize-filesystem
     
-    # 标记首次启动完成
-    touch /var/firstboot_done
+    # 标记完成
+    touch "\$FIRSTBOOT_FILE"
+    echo "首次启动配置完成"
 fi
+SCRIPT
 
-# 启动后自动连接已知 WiFi（可选）
-if [ -f /boot/wifi-connect.sh ]; then
-    /bin/bash /boot/wifi-connect.sh &
-fi
-
-exit 0
-RCLOCAL
-
-    chmod +x /etc/rc.local
+    chmod +x /usr/local/bin/xf-firstboot.sh
+    systemctl enable xf-a311d2-firstboot.service
 EOF
 }
 
-# 主执行函数
+# 主函数
 main() {
-    echo "开始定制 Armbian 镜像..."
-    
-    # 这里需要根据实际镜像文件路径进行调整
-    local image_file="$1"
-    
-    if [ -z "$image_file" ]; then
-        echo "错误: 未指定镜像文件"
-        exit 1
-    fi
-    
-    # 创建挂载点
-    mkdir -p $IMAGE_MOUNT
-    mkdir -p $ROOT_MOUNT
+    echo "开始定制镜像: $IMAGE_FILE"
     
     # 挂载镜像
-    echo "挂载镜像..."
-    mount_image "$image_file" "$IMAGE_MOUNT"
-    
-    # 绑定挂载系统目录
-    mount --bind /dev $ROOT_MOUNT/dev
-    mount --bind /proc $ROOT_MOUNT/proc
-    mount --bind /sys $ROOT_MOUNT/sys
+    mount_image
     
     # 执行定制步骤
-    install_additional_packages
-    configure_networking
+    install_packages
+    configure_network
     configure_usb_devices
-    configure_gpu_display
-    install_pve_components
-    create_firstboot_script
+    configure_gpu
+    setup_firstboot
     
-    # 清理和卸载
-    umount $ROOT_MOUNT/dev
-    umount $ROOT_MOUNT/proc
-    umount $ROOT_MOUNT/sys
-    umount $IMAGE_MOUNT
+    # 卸载镜像
+    umount_image
     
-    echo "镜像定制完成!"
+    echo "=== 镜像定制完成 ==="
+    echo "镜像文件: $IMAGE_FILE"
 }
+
+# 捕获信号，确保卸载
+trap umount_image EXIT INT TERM
 
 # 执行主函数
 main "$@"
