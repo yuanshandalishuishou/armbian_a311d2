@@ -38,7 +38,6 @@ find /proc/device-tree -name "*.dtb" -exec fdtdump {} \; | less
 
 #*********************************************************************************************************************************************#
 
-
 #!/bin/bash
 set -e
 
@@ -287,14 +286,27 @@ prepare_build_env() {
             log_error "克隆 Armbian 构建系统失败"
             exit 1
         fi
+        
+        cd build
     else
         log_info "Armbian 构建目录已存在，更新代码..."
         cd build
-        git pull
-        cd ..
+        
+        # 检查是否在标签上（游离 HEAD 状态）
+        if ! git symbolic-ref -q HEAD > /dev/null; then
+            log_info "当前在标签上，切换到 main 分支进行更新..."
+            git checkout -f main
+        fi
+        
+        # 拉取最新更新
+        git pull origin main
+        
+        if [[ $? -ne 0 ]]; then
+            log_warning "Git 拉取失败，尝试强制更新..."
+            git fetch --all
+            git reset --hard origin/main
+        fi
     fi
-    
-    cd build
     
     # 切换到最新稳定版本
     log_info "获取最新稳定版本..."
@@ -306,7 +318,7 @@ prepare_build_env() {
     fi
     
     log_info "切换到最新稳定版本: $LATEST_TAG"
-    git checkout $LATEST_TAG
+    git checkout -f $LATEST_TAG
     
     # 运行依赖检查脚本
     log_info "运行构建依赖检查..."
